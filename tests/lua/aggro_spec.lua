@@ -132,6 +132,20 @@ check(tr.container == CAMP_CPNT and tr.embed_off == 0x68 and tr.owner == CAMP
       and tr.owner_class_id == 111, "trace_store finds the embedding component, its owner and class id")
 check(aggro.trace_store(0x5000000).store == nil, "trace_store refuses a non-entity")
 
+-- crosscheck: an enemy on a store census reaches, then one it cannot
+local xc = aggro.crosscheck(CAMP_EN)
+check(xc.in_census and xc.store_in_census and xc.head_walk == 1 and xc.head_found,
+      "crosscheck: a reached enemy and store, head walk finds it")
+check(xc.chain[1] and xc.chain[1].dir == "next" and xc.chain[1].store == CAMP2_STORE
+      and xc.chain[1].in_census, "crosscheck walks the store chain")
+local LOST_STORE, LOST_EN = 0x4c00000, 0x4d00000
+classes[LOST_EN] = "oCEntity"
+store(LOST_STORE, LOST_EN)
+mem[LOST_EN + 0x38] = LOST_STORE
+local lost = aggro.crosscheck(LOST_EN)
+check(lost.in_census == false and lost.store_in_census == false and lost.head_found,
+      "crosscheck reports an unreached enemy and store")
+
 -- dispatcher_of: the full guard chain
 check(aggro.dispatcher_of(BOSS) == BOSS + OFF, "dispatcher_of = entity + learned offset")
 check(select(1, aggro.dispatcher_of(0x5000000)) == nil, "dispatcher_of refuses a non-entity")

@@ -191,6 +191,7 @@ return function(env)
             walk_store(sp, function(e) add(e, R.spawn.template_of(e), sp) end)
         end
         stats.entities = #rows
+        stats.seen_entities, stats.seen_stores = seen_e, seen_s
         return rows, stats
     end
 
@@ -261,6 +262,75 @@ return function(env)
         else
             log("trace: no component with a vtable within 0x" .. string.format("%x", TRACE_BACK)
                 .. " bytes before the store")
+        end
+        return out
+    end
+
+    --- Why does census() miss this (hit) enemy? Runs a census and logs: whether
+    --- the entity and its store are in it; how far the store's own list walks
+    --- from the head (+0x28 / next +0x10) and from the tail (+0x20 / prev +0x08),
+    --- and whether either reaches the entity; then CHAIN_STEPS stores each way
+    --- along the store chain (+0x08 / +0x10) with their counts, selector RTTI
+    --- (+0x60) and census membership; and the store's spawner component
+    --- (store - 0x68) with its +0x08 owner. Read-only.
+    local CHAIN_STEPS = 8
+    local SP_TAIL, E_PREV, SP_SELECTOR = 0x20, 0x08, 0x60
+    function M.crosscheck(entity)
+        local out = {}
+        local _, stats = M.census()
+        local se, ss = stats.seen_entities or {}, stats.seen_stores or {}
+        local sp = I.read_u64(entity + E_OWNER)
+        out.in_census, out.store_in_census = se[entity] == true, ss[sp] == true
+        log(string.format("xcheck: enemy 0x%x in census=%s; store 0x%x in census=%s "
+            .. "(census %s scene, %s stores, %s entities)", entity, tostring(out.in_census),
+            sp or 0, tostring(out.store_in_census), tostring(stats.scene),
+            tostring(stats.stores), tostring(stats.entities)))
+        if not is(sp, "oCEntitySpawner") then return out end
+        local function walk(start, link)
+            local n, e, found = 0, I.read_u64(sp + start), false
+            while e and e ~= 0 and n < LIST_MAX and is(e, "oCEntity") do
+                n = n + 1
+                if e == entity then found = true end
+                e = I.read_u64(e + link)
+            end
+            return n, found, e
+        end
+        local hn, hfound, hstop = walk(SP_HEAD, E_NEXT)
+        local tn, tfound, tstop = walk(SP_TAIL, E_PREV)
+        out.head_walk, out.head_found, out.tail_walk, out.tail_found = hn, hfound, tn, tfound
+        log(string.format("xcheck: store count=%s; head walk %d (reaches enemy=%s, stopped at 0x%x %s); "
+            .. "tail walk %d (reaches enemy=%s, stopped at 0x%x %s)",
+            tostring(I.read_u32(sp + SP_COUNT)), hn, tostring(hfound), hstop or 0,
+            tostring(R.ptr.has_vtable(hstop) and R.rtti.name(hstop) or nil),
+            tn, tostring(tfound), tstop or 0,
+            tostring(R.ptr.has_vtable(tstop) and R.rtti.name(tstop) or nil)))
+        out.chain = {}
+        for _, dir in ipairs({ { "prev", SP_PREV }, { "next", SP_NEXT } }) do
+            local cur = sp
+            for step = 1, CHAIN_STEPS do
+                cur = I.read_u64(cur + dir[2])
+                if not is(cur, "oCEntitySpawner") then
+                    log(string.format("xcheck:   %s %d: 0x%x %s (end)", dir[1], step, cur or 0,
+                        tostring(R.ptr.has_vtable(cur) and R.rtti.name(cur) or nil)))
+                    break
+                end
+                local sel = I.read_u64(cur + SP_SELECTOR)
+                out.chain[#out.chain + 1] = { dir = dir[1], step = step, store = cur,
+                                              in_census = ss[cur] == true }
+                log(string.format("xcheck:   %s %d: store 0x%x count=%s in census=%s selector=%s",
+                    dir[1], step, cur, tostring(I.read_u32(cur + SP_COUNT)), tostring(ss[cur] == true),
+                    tostring(R.ptr.has_vtable(sel) and R.rtti.name(sel) or nil)))
+            end
+        end
+        local cpnt = sp - CPNT_STORE
+        if R.ptr.has_vtable(cpnt) then
+            local owner = I.read_u64(cpnt + 0x08)
+            out.component_class = R.rtti.name(cpnt)
+            out.owner, out.owner_in_census = owner, se[owner] == true
+            log(string.format("xcheck: store-0x68 = %s; its +0x08 = 0x%x %s, in census=%s",
+                tostring(out.component_class), owner or 0,
+                tostring(R.ptr.has_vtable(owner) and R.rtti.name(owner) or nil),
+                tostring(out.owner_in_census)))
         end
         return out
     end
