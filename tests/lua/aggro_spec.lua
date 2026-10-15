@@ -47,13 +47,22 @@ local function store(sp, ...)                   -- an oCEntitySpawner list
     mem[sp + 0x18], mem[sp + 0x28] = #list, list[1] or 0
     for i, e in ipairs(list) do mem[e + 0x10] = list[i + 1] or 0 end
 end
-classes[CAMP_CPNT] = "oCSomeCpnt"
+classes[CAMP_CPNT] = "oCEntityCpntEntitySpawner"
 cmap(CAMP, 111, CAMP_CPNT)
 store(CAMP_CPNT + 0x68, CAMP_EN)
+-- A second camp whose store is reachable ONLY through the store chain
+-- (camp store +0x10 -> next store), as the in-game hit trace showed.
+local CAMP2_STORE, CAMP2_EN = 0x4a00000, 0x4b00000
+classes[CAMP2_EN] = "oCEntity"
+enemies[CAMP2_EN] = true
+setd(CAMP2_EN)
+setpos(CAMP2_EN, 7, 0, 0)
+store(CAMP2_STORE, CAMP2_EN)
+mem[CAMP_CPNT + 0x68 + 0x10] = CAMP2_STORE
 classes[BSP_CPNT] = "oCEntityCpntEntitySpawner"
 cmap(BSP, SPAWNER_CLS, BSP_CPNT)
 store(BSP_CPNT + 0x80, BOSS)
-local templates = { [BOSS] = 0xb0, [CAMP_EN] = 0xa1 }
+local templates = { [BOSS] = 0xb0, [CAMP_EN] = 0xa1, [CAMP2_EN] = 0xa2 }
 
 local hero_on = true
 local off_value = OFF
@@ -93,8 +102,8 @@ local aggro = require("rsmm.aggro")({ R = R, I = I, named_event = NE,
 
 -- census: scene list plus every store reachable from it
 local seen, cstats = aggro.census()
-check(cstats.scene == 3 and cstats.stores == 2 and cstats.entities == 5,
-      "census walks the scene list and both stores (3 scene, 2 stores, 5 entities)")
+check(cstats.scene == 3 and cstats.stores == 3 and cstats.entities == 6,
+      "census walks the scene list, both stores and the chained one (3 scene, 3 stores, 6 entities)")
 
 -- find: filter by template path, case-insensitive; nearest the hero first
 local rows = aggro.find("BOSS_")
@@ -102,8 +111,9 @@ check(#rows == 1 and rows[1].entity == BOSS, "find('BOSS_') reaches the boss on 
 check(rows[1] and rows[1].hero_distance and math.abs(rows[1].hero_distance - 10) < 1e-6,
       "find reports hero distance")
 local all = aggro.find(nil)
-check(#all == 3 and all[1].entity == GRUNT and all[2].entity == CAMP_EN and all[3].entity == BOSS,
-      "find(nil) lists scene and store enemies, nearest first")
+check(#all == 4 and all[1].entity == GRUNT and all[2].entity == CAMP_EN
+      and all[3].entity == CAMP2_EN and all[4].entity == BOSS,
+      "find(nil) lists scene, store and chained-store enemies, nearest first")
 
 -- no hero: nothing to anchor the scene list, and the reason says so
 hero_on = false

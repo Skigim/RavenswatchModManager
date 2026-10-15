@@ -93,11 +93,15 @@ return function(env)
     -- Every store is an intrusive list, the same layout as the scene spawner's
     -- (spawn.lua): count +0x18, head +0x28, next entity +0x10.
     local SP_COUNT, SP_HEAD, E_NEXT = 0x18, 0x28, 0x10
+    -- Stores are themselves chained, prev +0x08 / next +0x10 (hit trace in game
+    -- 2026-10-15: three camp stores, each linking two more oCEntitySpawners).
+    local SP_PREV, SP_NEXT = 0x08, 0x10
     local E_OWNER       = 0x38    -- entity -> the oCEntitySpawner that placed it
     local CPNT_STORE    = 0x68    -- where spawner components embed their store
+                                  -- (confirmed for camp stores, same trace)
     local SCAN_TO       = 0x100   -- spawner-class components: search up to here
     local LIST_MAX      = 8192
-    local MAX_STORES    = 512
+    local MAX_STORES    = 2048
     local MAX_ENTITIES  = 16384
     -- Runtime component classes that own a store (data/class_ids.json).
     local SPAWNER_CLASSES = {
@@ -159,20 +163,20 @@ return function(env)
             return rows, stats
         end
         local seen_e, seen_s, queue = {}, {}, {}
+        local function enqueue(sp)
+            if sp and not seen_s[sp] and #queue < MAX_STORES and is(sp, "oCEntitySpawner") then
+                seen_s[sp] = true
+                queue[#queue + 1] = sp
+            end
+        end
         local function add(e, t, store)
             if seen_e[e] or #rows >= MAX_ENTITIES then return end
             seen_e[e] = true
             rows[#rows + 1] = { entity = e, template = t, store = store }
             local found = {}
             stores_in(e, found)
-            local own = I.read_u64(e + E_OWNER)
-            if is(own, "oCEntitySpawner") then found[#found + 1] = own end
-            for _, sp in ipairs(found) do
-                if not seen_s[sp] and #queue < MAX_STORES then
-                    seen_s[sp] = true
-                    queue[#queue + 1] = sp
-                end
-            end
+            found[#found + 1] = I.read_u64(e + E_OWNER)
+            for _, sp in ipairs(found) do enqueue(sp) end
         end
         local scene = R.spawn.entities()
         stats.scene = #scene
@@ -182,6 +186,8 @@ return function(env)
             local sp = queue[qi]
             qi = qi + 1
             stats.stores = stats.stores + 1
+            enqueue(I.read_u64(sp + SP_PREV))
+            enqueue(I.read_u64(sp + SP_NEXT))
             walk_store(sp, function(e) add(e, R.spawn.template_of(e), sp) end)
         end
         stats.entities = #rows
@@ -224,7 +230,10 @@ return function(env)
                 local cls = R.rtti.name(obj)
                 out.before[#out.before + 1] = { off = off, obj = obj, class = cls }
                 log(string.format("trace:   store-0x%x = 0x%x %s", off, obj, tostring(cls)))
-                if not out.container and type(cls) == "string" and cls:find("Cpnt", 1, true) then
+                -- The spawner component, not the value signals packed before
+                -- the store (the first trace picked a signal at -0x30).
+                if not out.container and type(cls) == "string" and cls:find("Cpnt", 1, true)
+                   and cls:find("Spawner", 1, true) then
                     out.container, out.container_class, out.embed_off = obj, cls, off
                 end
                 if #out.before >= TRACE_HITS then break end
