@@ -112,6 +112,16 @@ check(#none == 0 and nstats.why and nstats.why:find("HERO_CAPTURE", 1, true),
       "find without a hero returns nothing and names hero capture")
 hero_on = true
 
+-- trace_store: from an enemy's +0x38 back to the component that embeds the store
+mem[CAMP_EN + 0x38] = CAMP_CPNT + 0x68
+mem[CAMP_CPNT + 0x08] = CAMP
+local tr = aggro.trace_store(CAMP_EN)
+check(tr.store == CAMP_CPNT + 0x68 and tr.store_class == "oCEntitySpawner",
+      "trace_store reads the store at entity+0x38")
+check(tr.container == CAMP_CPNT and tr.embed_off == 0x68 and tr.owner == CAMP
+      and tr.owner_class_id == 111, "trace_store finds the embedding component, its owner and class id")
+check(aggro.trace_store(0x5000000).store == nil, "trace_store refuses a non-entity")
+
 -- dispatcher_of: the full guard chain
 check(aggro.dispatcher_of(BOSS) == BOSS + OFF, "dispatcher_of = entity + learned offset")
 check(select(1, aggro.dispatcher_of(0x5000000)) == nil, "dispatcher_of refuses a non-entity")

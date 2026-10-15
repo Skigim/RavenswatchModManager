@@ -188,6 +188,74 @@ return function(env)
         return rows, stats
     end
 
+    --- Where does this entity's store live? Logs and returns what is readable:
+    --- the store named by entity+0x38, its first pointer fields with their RTTI,
+    --- the nearest objects with a vtable BEFORE it (the candidates for the
+    --- object that embeds it), the first of those that names itself a component
+    --- with its +0x08 owner, and whether that owner's component map holds it
+    --- (and under which class id). Read-only diagnostics for census().
+    local TRACE_BACK, TRACE_FIELDS, TRACE_HITS = 0x800, 0x60, 6
+    function M.trace_store(entity)
+        local out = { entity = entity }
+        if not is_entity(entity) then
+            log("trace: not a live oCEntity")
+            return out
+        end
+        local sp = I.read_u64(entity + E_OWNER)
+        out.store = sp
+        out.store_class = R.ptr.has_vtable(sp) and R.rtti.name(sp) or nil
+        log(string.format("trace: entity 0x%x store(+0x38)=0x%x rtti=%s count=%s",
+            entity, sp or 0, tostring(out.store_class),
+            tostring(sp and I.read_u32(sp + SP_COUNT))))
+        if not R.ptr.plausible(sp) then return out end
+        out.fields = {}
+        for off = 0, TRACE_FIELDS, 8 do
+            local v = I.read_u64(sp + off)
+            local cls = R.ptr.plausible(v) and R.ptr.has_vtable(v) and R.rtti.name(v) or nil
+            if cls then
+                out.fields[#out.fields + 1] = { off = off, value = v, class = cls }
+                log(string.format("trace:   store+0x%x -> 0x%x %s", off, v, cls))
+            end
+        end
+        out.before = {}
+        for off = 8, TRACE_BACK, 8 do
+            local obj = sp - off
+            if R.ptr.has_vtable(obj) then
+                local cls = R.rtti.name(obj)
+                out.before[#out.before + 1] = { off = off, obj = obj, class = cls }
+                log(string.format("trace:   store-0x%x = 0x%x %s", off, obj, tostring(cls)))
+                if not out.container and type(cls) == "string" and cls:find("Cpnt", 1, true) then
+                    out.container, out.container_class, out.embed_off = obj, cls, off
+                end
+                if #out.before >= TRACE_HITS then break end
+            end
+        end
+        if out.container then
+            local owner = I.read_u64(out.container + 0x08)
+            out.owner = owner
+            out.owner_class = R.ptr.has_vtable(owner) and R.rtti.name(owner) or nil
+            local k = R.net and R.net._k
+            if k and is(owner, "oCEntity") then
+                local slots, mask = I.read_u64(owner + k.SLOTS), I.read_u64(owner + k.MASK)
+                if R.ptr.plausible(slots) and type(mask) == "number" and mask >= 0 and mask < k.MAX then
+                    for i = 0, mask do
+                        if I.read_u64(slots + i * 0x10 + 8) == out.container then
+                            out.owner_class_id = I.read_u32(slots + i * 0x10)
+                            break
+                        end
+                    end
+                end
+            end
+            log(string.format("trace: container 0x%x %s embeds the store at +0x%x; owner 0x%x %s; "
+                .. "owner map class id %s", out.container, out.container_class, out.embed_off,
+                owner or 0, tostring(out.owner_class), tostring(out.owner_class_id)))
+        else
+            log("trace: no component with a vtable within 0x" .. string.format("%x", TRACE_BACK)
+                .. " bytes before the store")
+        end
+        return out
+    end
+
     --- Live enemies whose template path contains `match` (case-insensitive plain
     --- text; nil or "" = every enemy). One row per ENTITY, nearest the hero first
     --- when both positions read. Read-only. Second value: census stats.
