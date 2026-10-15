@@ -48,6 +48,27 @@ def test_rsmm_lua_spec():
     assert "0 failed" in proc.stdout, proc.stdout
 
 
+# Standalone submodule specs: each loads one rsmm/*.lua module under its own
+# hand-built env and takes the same <lib> argument as rsmm_spec.lua.
+SUBMODULE_SPECS = ["aggro_spec.lua", "boss_spawn_spec.lua"]
+
+
+@pytest.mark.parametrize("spec", SUBMODULE_SPECS)
+def test_submodule_lua_spec(spec):
+    lua = _lua_bin()
+    if lua is None:
+        pytest.skip("no standalone lua interpreter on PATH (lua5.4/lua)")
+    proc = subprocess.run(
+        [lua, str(REPO / "tests" / "lua" / spec), str(LIB)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO),
+    )
+    assert proc.returncode == 0, (
+        f"{spec} failed (exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
+    )
+
+
 MODS_SPEC = REPO / "tests" / "lua" / "mods_spec.lua"
 
 
@@ -167,8 +188,9 @@ _LUA_MAXVARS = 200
 #: while lifting another namespace out (see `_submodule_fn`) is still a choice.
 _MIN_FREE_LOCALS = 40
 
-_FN_HEADER = re.compile(r"^(?:main|function) <([^:>]+):(\d+),\d+> \(.*? at (0x[0-9a-f]+)\)", re.M)
-_LOCALS = re.compile(r"^locals \(\d+\) for (0x[0-9a-f]+):\n((?:\t.*\n)*)", re.M)
+# Addresses are printf %p: "0x55d0..." on Linux, bare "00000166C859AB10" on Windows.
+_FN_HEADER = re.compile(r"^(?:main|function) <(.+?):(\d+),\d+> \(.*? at ((?:0x)?[0-9a-fA-F]+)\)", re.M)
+_LOCALS = re.compile(r"^locals \(\d+\) for ((?:0x)?[0-9a-fA-F]+):\n((?:\t.*\n)*)", re.M)
 
 
 def _peak_live_locals(listing: str) -> list[tuple[int, int]]:

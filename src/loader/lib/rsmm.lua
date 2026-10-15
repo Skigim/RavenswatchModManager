@@ -5202,6 +5202,30 @@ if _named_event then
     end
 end
 
+-- Lives in rsmm/boss_spawn.lua. Brings in the current chapter's boss: probe() is
+-- read-only; awaken{} sends the Map_Boss_Spawner its own AWAKENING_* events;
+-- spawn_from_selector{} R.spawn's the template of its Boss To Spawn Selector.
+-- Written 2026-10-15 from static evidence; NOT yet run in game.
+if _named_event then
+    local ok, x = _submodule_fn("boss_spawn", {
+        R = R, I = I, named_event = _named_event,
+        dispatcher_entity_off = function() return _DISPATCHER_ENTITY_OFF end,
+    })
+    if ok and type(x) == "table" then R.bossspawn = x end
+end
+
+-- Lives in rsmm/aggro.lua. Sends REQUEST_BHV_DEFAULT_FIGHTING to a live enemy's OWN
+-- dispatcher (entity + the learned offset). Not proven in game.
+--
+--     R.aggro.find("boss_") / .dispatcher_of(e) / .force(e) / .observe(e, s)
+if _named_event then
+    local ok, x = _submodule_fn("aggro", {
+        R = R, I = I, named_event = _named_event,
+        dispatcher_entity_off = function() return _DISPATCHER_ENTITY_OFF end,
+    })
+    if ok and type(x) == "table" then R.aggro = x end
+end
+
 -- ── R.serialize ───────────────────────────────────────────────────────────
 --
 -- Write engine objects back out through the ENGINE'S OWN serializer.
