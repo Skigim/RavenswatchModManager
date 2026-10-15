@@ -154,8 +154,27 @@ return function(env)
     --- Every entity reachable from the scene: { {entity, template, store}, ... }
     --- plus stats {scene, stores, entities}. `store` is "scene" or the address of
     --- the oCEntitySpawner the entity was found on. Read-only.
+    -- Camp stores form their OWN chain, which nothing on the scene list leads
+    -- into (cross-check in game 2026-10-15: three hit camp enemies, their stores
+    -- and their camp entities all outside a 467-store census). That chain ends
+    -- at an oCSpawner. Two ways in: (1) seed stores, remembered from any enemy
+    -- the hero hits; the chain from one reaches every camp; (2) oCSpawner
+    -- objects found inside the stores' oCDtGameScene (+0x58) or at a chain end,
+    -- whose fields may point at stores. (2) is a guess being tested.
+    local SP_SCENE, SCENE_SCAN, SENTINEL_FIELDS, MAX_SEEDS = 0x58, 0x4000, 0x80, 16
+    local seeds, seeds_n = {}, 0
+
+    --- Remember a store census() should start from (an enemy's entity+0x38).
+    function M.seed_store(sp)
+        if seeds_n >= MAX_SEEDS or seeds[sp] or not is(sp, "oCEntitySpawner") then return false end
+        seeds[sp] = true
+        seeds_n = seeds_n + 1
+        return true
+    end
+
     function M.census()
-        local rows, stats = {}, { scene = 0, stores = 0, entities = 0 }
+        local rows, stats = {}, { scene = 0, stores = 0, entities = 0, seeds = 0,
+                                  sentinels = 0, scenes = 0 }
         local hero = R.entity and R.entity.hero and R.entity.hero() or nil
         if not hero then
             stats.why = "no hero: the scene list is reached from the hero "
@@ -178,6 +197,33 @@ return function(env)
             found[#found + 1] = I.read_u64(e + E_OWNER)
             for _, sp in ipairs(found) do enqueue(sp) end
         end
+        -- An oCSpawner's fields that point at stores.
+        local seen_sentinel, seen_scene = {}, {}
+        local function sentinel(obj)
+            if seen_sentinel[obj] or not is(obj, "oCSpawner") then return end
+            seen_sentinel[obj] = true
+            stats.sentinels = stats.sentinels + 1
+            for f = 0, SENTINEL_FIELDS, 8 do enqueue(I.read_u64(obj + f)) end
+        end
+        -- oCSpawner objects embedded in, or pointed at by, the game scene.
+        local function scan_scene(sc)
+            if seen_scene[sc] or not R.ptr.plausible(sc) then return end
+            seen_scene[sc] = true
+            stats.scenes = stats.scenes + 1
+            for off = 0, SCENE_SCAN, 8 do
+                if R.ptr.has_vtable(sc + off) then sentinel(sc + off) end
+                local v = I.read_u64(sc + off)
+                if R.ptr.plausible(v) and R.ptr.has_vtable(v) then sentinel(v) end
+            end
+        end
+        for sp in pairs(seeds) do
+            if is(sp, "oCEntitySpawner") then
+                stats.seeds = stats.seeds + 1
+                enqueue(sp)
+            else
+                seeds[sp], seeds_n = nil, seeds_n - 1     -- freed since: forget it
+            end
+        end
         local scene = R.spawn.entities()
         stats.scene = #scene
         for _, r in ipairs(scene) do add(r.entity, r.template, "scene") end
@@ -186,8 +232,12 @@ return function(env)
             local sp = queue[qi]
             qi = qi + 1
             stats.stores = stats.stores + 1
-            enqueue(I.read_u64(sp + SP_PREV))
-            enqueue(I.read_u64(sp + SP_NEXT))
+            for _, link in ipairs({ SP_PREV, SP_NEXT }) do
+                local v = I.read_u64(sp + link)
+                enqueue(v)
+                if R.ptr.plausible(v) then sentinel(v) end
+            end
+            scan_scene(I.read_u64(sp + SP_SCENE))
             walk_store(sp, function(e) add(e, R.spawn.template_of(e), sp) end)
         end
         stats.entities = #rows
@@ -365,6 +415,42 @@ return function(env)
         return out, stats
     end
 
+    -- FALLBACK OFFSET. rsmm.lua learns the offset from INTERACTION_REQUEST, whose
+    -- +0x50 carries the hero entity. On loader v44 / this game build REQUEST never
+    -- arrived and the raw +0x50 held 0 or 1.0f (playtest 2026-10-15), so it is
+    -- never learned. INTERACTION_VALIDATE does arrive, at one fixed dispatcher,
+    -- and rsmm.lua already treats VALIDATE as the HERO's dispatcher. So:
+    -- offset = validate dispatcher - captured hero entity, accepted only when it
+    -- is in range and aligned, the hero entity is an oCEntity by RTTI, and the
+    -- dispatcher at that offset has a readable channel map (not the busy guard:
+    -- this handler runs INSIDE that dispatch, so the guard is set by design).
+    -- The 2026-07 value was 0x4d8 (events-bus.md); a different
+    -- value is logged, not refused.
+    local KNOWN_OFF, OFF_MAX = 0x4d8, 0x4000
+    local learned_off = nil
+    function M.offset() return (disp_off and disp_off()) or learned_off end
+    R.on("gameplay:INTERACTION_VALIDATE", function(ev)
+        if M.offset() then return end
+        local disp = type(ev) == "table" and tonumber(ev.dispatcher) or nil
+        local hero = R.entity and R.entity.hero and R.entity.hero() or nil
+        local hero_e = hero and I.read_u64(hero + 0x08) or nil
+        if not (disp and hero_e and is(hero_e, "oCEntity")) then return end
+        local off = disp - hero_e
+        if off <= 0 or off > OFF_MAX or off % 8 ~= 0 then
+            log(string.format("VALIDATE at 0x%x is not the hero's dispatcher (hero entity 0x%x); not learned",
+                disp, hero_e))
+            return
+        end
+        if not R.ptr.plausible(I.read_u64(disp + DISP_CHAN)) then
+            log(string.format("VALIDATE dispatcher 0x%x fails the channel-map check; not learned", disp))
+            return
+        end
+        learned_off = off
+        log(string.format("dispatcher offset learned from INTERACTION_VALIDATE: entity+0x%x%s", off,
+            off == KNOWN_OFF and " (matches the 2026-07 value)"
+                or string.format(" (2026-07 value was 0x%x)", KNOWN_OFF)))
+    end)
+
     --- The dispatcher of an enemy entity, or nil + why. Everything the engine will
     --- walk is checked here: a live oCEntity that is an enemy, the learned offset,
     --- a plausible dispatcher whose channel map reads, and not mid-dispatch.
@@ -373,7 +459,7 @@ return function(env)
         if not R.spawn.is_enemy(entity) then
             return nil, "entity has no enemy controller (refusing to address a non-enemy)"
         end
-        local off = disp_off and disp_off() or nil
+        local off = M.offset()
         if not off then
             return nil, "dispatcher offset not learned yet — interact with anything once "
                 .. "(chest, fountain) with RSMM_ENABLE_GAMEPLAY_EVENTS=1 and wait for the "

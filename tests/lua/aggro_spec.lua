@@ -65,6 +65,7 @@ store(BSP_CPNT + 0x80, BOSS)
 local templates = { [BOSS] = 0xb0, [CAMP_EN] = 0xa1, [CAMP2_EN] = 0xa2 }
 
 local hero_on = true
+local handlers = {}
 local off_value = OFF
 local R = {
     log = function(m) logs[#logs + 1] = m end,
@@ -85,7 +86,7 @@ local R = {
         describe = function(e) return { entity = e } end,
     },
     schedule = { after = function() end },
-    on = function() end,
+    on = function(name, fn) handlers[name] = fn end,
 }
 local I = {
     read_u64 = function(a) return mem[a] end,
@@ -146,6 +147,23 @@ local lost = aggro.crosscheck(LOST_EN)
 check(lost.in_census == false and lost.store_in_census == false and lost.head_found,
       "crosscheck reports an unreached enemy and store")
 
+-- seed_store: a store remembered from a hit makes its enemies reachable
+enemies[LOST_EN] = true
+check(aggro.seed_store(LOST_STORE) == true and aggro.seed_store(LOST_STORE) == false,
+      "seed_store accepts a store once")
+local _, sstats = aggro.census()
+check(sstats.seeds == 1 and sstats.seen_entities[LOST_EN], "census starts from a seed store")
+
+-- sentinel: an oCSpawner at a chain end points at a store census then walks
+local SENT, SENT_STORE, SENT_EN = 0x4e00000, 0x4f00000, 0x5100000
+classes[SENT], classes[SENT_EN] = "oCSpawner", "oCEntity"
+store(SENT_STORE, SENT_EN)
+mem[CAMP2_STORE + 0x10] = SENT
+mem[SENT + 0x20] = SENT_STORE
+local _, tstats = aggro.census()
+check(tstats.sentinels == 1 and tstats.seen_entities[SENT_EN],
+      "census follows an oCSpawner at a chain end to its stores")
+
 -- dispatcher_of: the full guard chain
 check(aggro.dispatcher_of(BOSS) == BOSS + OFF, "dispatcher_of = entity + learned offset")
 check(select(1, aggro.dispatcher_of(0x5000000)) == nil, "dispatcher_of refuses a non-entity")
@@ -160,6 +178,18 @@ setd(BOSS, 0)
 mem[BOSS + OFF + 0x28] = nil
 check(select(1, aggro.dispatcher_of(BOSS)) == nil, "dispatcher_of refuses an unreadable channel map")
 setd(BOSS, 0)
+
+-- fallback offset: learned from INTERACTION_VALIDATE at the hero's dispatcher
+local validate = handlers["gameplay:INTERACTION_VALIDATE"]
+check(type(validate) == "function", "aggro listens for INTERACTION_VALIDATE")
+off_value = nil
+mem[HERO_E + 0x08] = HERO_E                   -- hero() hands the controller; +0x08 = entity
+validate({ dispatcher = 0x9000000 })          -- not at the hero: rejected
+check(aggro.offset() == nil, "a VALIDATE away from the hero teaches nothing")
+validate({ dispatcher = HERO_E + OFF })
+check(aggro.offset() == OFF and aggro.dispatcher_of(BOSS) == BOSS + OFF,
+      "VALIDATE at hero+offset teaches the offset dispatcher_of then uses")
+off_value = OFF
 
 -- force: one event, to the boss's own dispatcher
 check(aggro.force(BOSS) == true, "force succeeds on a valid boss")
