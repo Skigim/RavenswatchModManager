@@ -3,7 +3,8 @@
 -- written from cooked-entity data and the events-bus notes only (2026-10-15,
 -- docs/superpowers/plans/2026-10-15-boss-aggro.md has what is confirmed vs not).
 --
---     R.aggro.find("boss_")            -> { {entity, template, name, pos={x,y,z}}, ... }
+--     R.aggro.find("boss_")            -> { {entity, template, name, pos={x,y,z}}, ... }, stats
+--     R.aggro.census()                 -> { {entity, template, store}, ... }, stats
 --     R.aggro.dispatcher_of(entity)    -> dispatcher | nil, why        (read-only, validated)
 --     R.aggro.force(entity [, opts])   -> true | false, why            (sends the event)
 --     R.aggro.position(entity)         -> x, y, z | nil
@@ -26,6 +27,16 @@
 -- runtime by rsmm.lua and handed in as a getter; it went stale once, 2026-07-09,
 -- so it is never a literal here). It is learned from the hero's interaction event,
 -- so one interaction (a chest, a fountain) must have happened first.
+--
+-- WHERE ENEMIES ARE. Not only on the scene spawner's list (R.spawn.entities):
+-- a camp keeps its enemies on its OWN oCEntitySpawner (entity+0x38 names it;
+-- measured in game 2026-09-13), and a Map_Boss_Spawner places the boss through
+-- its own `Boss Spawner` component. census() walks the scene list, then every
+-- oCEntitySpawner embedded in a component of an entity it has seen (or named by
+-- an entity's +0x38), breadth first, read-only. The scene list is reached from
+-- the hero, so the hero must be captured (RSMM_ENABLE_HERO_CAPTURE; a mod asks
+-- for it with `loader_flags` in its manifest). First playtest without this:
+-- "0 live enemies" (2026-10-15).
 --
 -- The event is built with named_event.send_value (a with-data carrier holding a
 -- bool): the NPC listener reads no payload as far as the cooked data shows, and
@@ -79,14 +90,115 @@ return function(env)
         return math.sqrt((hx - x) ^ 2 + (hy - y) ^ 2 + (hz - z) ^ 2)
     end
 
+    -- Every store is an intrusive list, the same layout as the scene spawner's
+    -- (spawn.lua): count +0x18, head +0x28, next entity +0x10.
+    local SP_COUNT, SP_HEAD, E_NEXT = 0x18, 0x28, 0x10
+    local E_OWNER       = 0x38    -- entity -> the oCEntitySpawner that placed it
+    local CPNT_STORE    = 0x68    -- where spawner components embed their store
+    local SCAN_TO       = 0x100   -- spawner-class components: search up to here
+    local LIST_MAX      = 8192
+    local MAX_STORES    = 512
+    local MAX_ENTITIES  = 16384
+    -- Runtime component classes that own a store (data/class_ids.json).
+    local SPAWNER_CLASSES = {
+        [267629480] = true,   -- oCEntityCpntEntitySpawner
+        [369581258] = true,   -- oCDtEntityCpntTileSpawner
+        [370187979] = true,   -- oCDtEntityCpntHeroSpawner
+    }
+
+    local function is(obj, class)
+        return R.ptr.has_vtable(obj) and R.rtti.name(obj) == class
+    end
+
+    local function walk_store(sp, fn)
+        local n = I.read_u32(sp + SP_COUNT)
+        if type(n) ~= "number" or n > LIST_MAX then return end
+        local e, seen = I.read_u64(sp + SP_HEAD), 0
+        while e and e ~= 0 and seen < n and is(e, "oCEntity") do
+            seen = seen + 1
+            fn(e)
+            e = I.read_u64(e + E_NEXT)
+        end
+    end
+
+    -- Stores embedded in the entity's components, from its class-id map
+    -- (R.net._k: slots +0x5f0 of { u32 class; u64 component }, mask +0x600).
+    local function stores_in(entity, out)
+        local k = R.net and R.net._k
+        if not k then return end
+        local slots, mask = I.read_u64(entity + k.SLOTS), I.read_u64(entity + k.MASK)
+        if not R.ptr.plausible(slots) or type(mask) ~= "number" or mask < 0
+           or mask >= k.MAX then return end
+        for i = 0, mask do
+            local cls = I.read_u32(slots + i * 0x10)
+            local c = I.read_u64(slots + i * 0x10 + 8)
+            if cls and cls ~= 0 and R.ptr.plausible(c) and R.ptr.has_vtable(c) then
+                if is(c + CPNT_STORE, "oCEntitySpawner") then
+                    out[#out + 1] = c + CPNT_STORE
+                elseif SPAWNER_CLASSES[cls] then
+                    for off = 0x10, SCAN_TO, 8 do
+                        if is(c + off, "oCEntitySpawner") then
+                            out[#out + 1] = c + off
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    --- Every entity reachable from the scene: { {entity, template, store}, ... }
+    --- plus stats {scene, stores, entities}. `store` is "scene" or the address of
+    --- the oCEntitySpawner the entity was found on. Read-only.
+    function M.census()
+        local rows, stats = {}, { scene = 0, stores = 0, entities = 0 }
+        local hero = R.entity and R.entity.hero and R.entity.hero() or nil
+        if not hero then
+            stats.why = "no hero: the scene list is reached from the hero "
+                .. "(RSMM_ENABLE_HERO_CAPTURE off, or not in a run yet)"
+            return rows, stats
+        end
+        local seen_e, seen_s, queue = {}, {}, {}
+        local function add(e, t, store)
+            if seen_e[e] or #rows >= MAX_ENTITIES then return end
+            seen_e[e] = true
+            rows[#rows + 1] = { entity = e, template = t, store = store }
+            local found = {}
+            stores_in(e, found)
+            local own = I.read_u64(e + E_OWNER)
+            if is(own, "oCEntitySpawner") then found[#found + 1] = own end
+            for _, sp in ipairs(found) do
+                if not seen_s[sp] and #queue < MAX_STORES then
+                    seen_s[sp] = true
+                    queue[#queue + 1] = sp
+                end
+            end
+        end
+        local scene = R.spawn.entities()
+        stats.scene = #scene
+        for _, r in ipairs(scene) do add(r.entity, r.template, "scene") end
+        local qi = 1
+        while qi <= #queue do
+            local sp = queue[qi]
+            qi = qi + 1
+            stats.stores = stats.stores + 1
+            walk_store(sp, function(e) add(e, R.spawn.template_of(e), sp) end)
+        end
+        stats.entities = #rows
+        return rows, stats
+    end
+
     --- Live enemies whose template path contains `match` (case-insensitive plain
     --- text; nil or "" = every enemy). One row per ENTITY, nearest the hero first
-    --- when both positions read. Read-only.
+    --- when both positions read. Read-only. Second value: census stats.
     function M.find(match)
         local needle = type(match) == "string" and match ~= "" and match:lower() or nil
         local out, name_cache = {}, {}
-        for _, row in ipairs(R.spawn.entities()) do
-            local name = name_cache[row.template]
+        local all, stats = M.census()
+        for _, row in ipairs(all) do
+            -- A store entity may have no readable template: no name, never an index.
+            local name = false
+            if row.template then name = name_cache[row.template] end
             if name == nil then
                 name = R.spawn.name_of(row.template) or false
                 name_cache[row.template] = name
@@ -103,7 +215,7 @@ return function(env)
         table.sort(out, function(a, b)
             return (a.hero_distance or math.huge) < (b.hero_distance or math.huge)
         end)
-        return out
+        return out, stats
     end
 
     --- The dispatcher of an enemy entity, or nil + why. Everything the engine will

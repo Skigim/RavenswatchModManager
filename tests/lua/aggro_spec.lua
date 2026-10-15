@@ -25,15 +25,52 @@ setd(BOSS); setd(GRUNT); setd(HERO_E)
 local function setpos(e, x, y, z) mem[e + 0x324], mem[e + 0x328], mem[e + 0x32c] = x, y, z end
 setpos(BOSS, 10, 0, 0); setpos(GRUNT, 1, 0, 0); setpos(HERO_E, 0, 0, 0)
 
+-- Census. The scene list holds GRUNT plus two non-enemy holders. CAMP owns a
+-- component with a store at the usual +0x68; BSP (a boss spawner) owns a
+-- spawner-class component whose store sits elsewhere (+0x80), found by the scan.
+-- CAMP_EN and BOSS are on those stores only, not on the scene list.
+local CAMP, CAMP_EN, BSP = 0x4000000, 0x4100000, 0x4200000
+local CAMP_CPNT, BSP_CPNT = 0x4800000, 0x4900000
+local SPAWNER_CLS = 267629480
+classes[CAMP], classes[CAMP_EN], classes[BSP] = "oCEntity", "oCEntity", "oCEntity"
+enemies[CAMP_EN] = true
+setd(CAMP_EN)
+setpos(CAMP_EN, 5, 0, 0)
+local function cmap(e, cls, cpnt)              -- a one-slot component map
+    local slots = e + 0x700
+    mem[e + 0x5f0], mem[e + 0x600] = slots, 0
+    mem[slots], mem[slots + 8] = cls, cpnt
+end
+local function store(sp, ...)                   -- an oCEntitySpawner list
+    classes[sp] = "oCEntitySpawner"
+    local list = { ... }
+    mem[sp + 0x18], mem[sp + 0x28] = #list, list[1] or 0
+    for i, e in ipairs(list) do mem[e + 0x10] = list[i + 1] or 0 end
+end
+classes[CAMP_CPNT] = "oCSomeCpnt"
+cmap(CAMP, 111, CAMP_CPNT)
+store(CAMP_CPNT + 0x68, CAMP_EN)
+classes[BSP_CPNT] = "oCEntityCpntEntitySpawner"
+cmap(BSP, SPAWNER_CLS, BSP_CPNT)
+store(BSP_CPNT + 0x80, BOSS)
+local templates = { [BOSS] = 0xb0, [CAMP_EN] = 0xa1 }
+
+local hero_on = true
 local off_value = OFF
 local R = {
     log = function(m) logs[#logs + 1] = m end,
     ptr = { plausible = function(p) return type(p) == "number" and p >= 0x10000 and p % 8 == 0 end,
             has_vtable = function(p) return classes[p] ~= nil end },
     rtti = { name = function(p) return classes[p] end },
-    entity = { hero = function() return HERO_E end },
+    entity = { hero = function() return hero_on and HERO_E or nil end },
+    net = { _k = { SLOTS = 0x5f0, MASK = 0x600, MAX = 1024 } },
     spawn = {
-        entities = function() return { { entity = GRUNT, template = 0xa0 }, { entity = BOSS, template = 0xb0 } } end,
+        entities = function()
+            if not hero_on then return {} end
+            return { { entity = GRUNT, template = 0xa0 }, { entity = CAMP, template = 0xc0 },
+                     { entity = BSP, template = 0xd0 } }
+        end,
+        template_of = function(e) return templates[e] end,
         is_enemy = function(e) return enemies[e] == true end,
         name_of = function(t) return t == 0xb0 and "Enemies\\Boss_X\\Boss_X.entity.ot" or "Enemies\\Grunt.entity.ot" end,
         describe = function(e) return { entity = e } end,
@@ -54,12 +91,26 @@ end }
 local aggro = require("rsmm.aggro")({ R = R, I = I, named_event = NE,
     dispatcher_entity_off = function() return off_value end })
 
+-- census: scene list plus every store reachable from it
+local seen, cstats = aggro.census()
+check(cstats.scene == 3 and cstats.stores == 2 and cstats.entities == 5,
+      "census walks the scene list and both stores (3 scene, 2 stores, 5 entities)")
+
 -- find: filter by template path, case-insensitive; nearest the hero first
 local rows = aggro.find("BOSS_")
-check(#rows == 1 and rows[1].entity == BOSS, "find('BOSS_') returns only the boss")
-check(rows[1].hero_distance and math.abs(rows[1].hero_distance - 10) < 1e-6, "find reports hero distance")
+check(#rows == 1 and rows[1].entity == BOSS, "find('BOSS_') reaches the boss on its spawner's store")
+check(rows[1] and rows[1].hero_distance and math.abs(rows[1].hero_distance - 10) < 1e-6,
+      "find reports hero distance")
 local all = aggro.find(nil)
-check(#all == 2 and all[1].entity == GRUNT, "find(nil) lists every enemy, nearest first")
+check(#all == 3 and all[1].entity == GRUNT and all[2].entity == CAMP_EN and all[3].entity == BOSS,
+      "find(nil) lists scene and store enemies, nearest first")
+
+-- no hero: nothing to anchor the scene list, and the reason says so
+hero_on = false
+local none, nstats = aggro.find(nil)
+check(#none == 0 and nstats.why and nstats.why:find("HERO_CAPTURE", 1, true),
+      "find without a hero returns nothing and names hero capture")
+hero_on = true
 
 -- dispatcher_of: the full guard chain
 check(aggro.dispatcher_of(BOSS) == BOSS + OFF, "dispatcher_of = entity + learned offset")
